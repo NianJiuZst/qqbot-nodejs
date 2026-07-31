@@ -1,0 +1,93 @@
+name: Bug report
+description: Report a reproducible bug in the SDK
+title: "[Bug]: "
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug!
+
+        Before opening, please:
+        - Confirm you are on the latest published version.
+        - Search existing issues to avoid duplicates.
+        - **Do not** include real `appId`, `appSecret`, `access_token` or user `openid` in your report.
+
+  - type: input
+    id: sdk-version
+    attributes:
+      label: SDK version
+      placeholder: "1.0.3"
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js version
+      placeholder: "v22.14.0"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: "macOS 14 / Ubuntu 22.04 / Windows 11"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options:
+        - WebSocket
+        - Webhook
+        - Not applicable
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: |
+        A self-contained code snippet, or a link to a minimal repository.
+        Reports without a reproduction may be closed.
+      render: ts
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / error output
+      description: Paste relevant logs. **Redact credentials and openids.**
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I have searched existing issues.
+          required: true
+        - label: I have redacted all credentials, tokens and personal data.
+          required: true
+        - label: I can reproduce the bug on the latest release.
+          required: true
