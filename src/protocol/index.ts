@@ -80,6 +80,7 @@ export {
 export {
   GatewayConnection,
   type GatewayConnectionOptions,
+  type GatewayDisconnect,
   type PersistedSession,
   type SessionPersistencePort,
 } from "./gateway/gateway-connection.js";

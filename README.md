@@ -164,10 +164,15 @@ QQ platform constraint: `stream_messages` is available for **C2C only**.
 ```ts
 bot.on("ready",       () => console.log("connected"));
 bot.on("resumed",     () => console.log("reconnected"));
+bot.on("disconnected", ({ code, reason }) => console.log("disconnected", code, reason));
 bot.on("error",       (err) => console.error(err));
 bot.on("message",     (ctx, msg) => { /* C2C / Group / Guild / DM */ });
 bot.on("interaction", (ctx, event) => { /* button clicks */ });
 ```
+
+In WebSocket mode, `start()` rejects when reconnect attempts are exhausted or a remote
+close cannot be retried. It releases the connection and token refresher so the caller
+can start the bot again. `stop()` / abort still resolves normally.
 
 ### Protocol-level access
 

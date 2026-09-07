@@ -210,7 +210,10 @@ await bot.start(externalAbortSignal); // 由调用方控制何时停止
 1. 立刻同步获取一次 `access_token`（暴露认证错误，提前失败）。
 2. 启动后台 token 刷新循环。
 3. 创建并连接 WebSocket Gateway。
-4. 在 abort 之前持续接收事件、自动重连。
+4. 在 abort 之前持续接收事件、自动重连；重试耗尽或不可重试的远端关闭会使 `start()` 拒绝。
+
+无论正常停止还是终止失败，都会清理连接和 token 后台刷新任务；调用方可捕获
+`start()` 的拒绝并按自身的重启策略再次调用。
 
 ### 7.2 停止
 
@@ -248,10 +251,17 @@ SDK 自带：
 ```ts
 bot.on("ready",       (data) => { /* sessionId / heartbeat 已建立 */ });
 bot.on("resumed",     (data) => { /* 重连成功 */ });
+bot.on("disconnected", ({ code, reason }) => console.log("disconnected", code, reason));
 bot.on("error",       (err) => { /* 网络 / 协议错误 */ });
 bot.on("message",     (ctx, msg) => { /* MiddlewareContext + QQBotInboundMessage */ });
 bot.on("interaction", (ctx, event) => { /* InteractionContext + InteractionEvent，按钮回调等 */ });
 ```
+
+`disconnected` 在远端连接关闭或 Gateway 请求重连时触发，先于重连尝试。
+`code` / `reason` 对应远端关闭信息；Gateway 的 RECONNECT / INVALID_SESSION
+指令使用本地关闭码 `1000` 和 SDK 原因说明。主动 `stop()` / abort 不触发该事件。
+连接建立前的 token / Gateway URL 请求失败也会触发 `error`；可重试错误不结束 `start()`。
+协议层对应回调为 `GatewayConnectionOptions.onDisconnected`。
 
 `bot.on()` 返回 `this`，支持链式：
 

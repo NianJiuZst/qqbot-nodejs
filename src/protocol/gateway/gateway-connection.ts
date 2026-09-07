@@ -30,6 +30,12 @@ export interface SessionPersistencePort {
   clear: () => void;
 }
 
+/** A transport disconnect, before any reconnect attempt. */
+export interface GatewayDisconnect {
+  code: number;
+  reason: string;
+}
+
 export interface GatewayConnectionOptions {
   account: GatewayAccount;
   abortSignal: AbortSignal;
@@ -55,6 +61,7 @@ export interface GatewayConnectionOptions {
   onReady?: (data: unknown) => void;
   onResumed?: (data: unknown) => void;
   onError?: (error: Error) => void;
+  onDisconnected?: (event: GatewayDisconnect) => void;
   onMessage: (msg: InboundMessage) => void | Promise<void>;
   onInteraction?: (event: InteractionEvent) => void | Promise<void>;
   onRawEvent?: (type: string, data: unknown) => void | Promise<void>;
@@ -63,6 +70,8 @@ export interface GatewayConnectionOptions {
 /** Pure-protocol gateway connection. */
 export class GatewayConnection {
   private isAborted = false;
+  private run: Promise<void> | null = null;
+  private finish: (error?: Error) => void = () => {};
   private currentWs: WebSocket | null = null;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private sessionId: string | null = null;
@@ -82,13 +91,32 @@ export class GatewayConnection {
     this.resolveUserAgent = typeof ua === "function" ? ua : () => ua;
   }
 
-  /** Start the connection loop. Resolves when abortSignal fires. */
-  async start(): Promise<void> {
-    this.restoreSession();
-    this.registerAbortHandler();
-    await this.connect();
-    return new Promise<void>((resolve) => {
-      this.opts.abortSignal.addEventListener("abort", () => resolve());
+  /** Resolves on abort; rejects when the connection loop can no longer retry. */
+  start(): Promise<void> {
+    return this.run ??= new Promise<void>((resolve, reject) => {
+      const signal = this.opts.abortSignal;
+      const onAbort = () => this.finish();
+      this.finish = (error) => {
+        if (this.isAborted) return;
+        this.isAborted = true;
+        signal.removeEventListener("abort", onAbort);
+        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+        this.cleanup();
+        if (error) reject(error);
+        else resolve();
+      };
+      if (signal.aborted) {
+        this.finish();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        this.restoreSession();
+        void this.connect();
+      } catch (error) {
+        this.finish(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
 
@@ -117,39 +145,28 @@ export class GatewayConnection {
 
   // ============ Abort + cleanup ============
 
-  private registerAbortHandler(): void {
-    this.opts.abortSignal.addEventListener("abort", () => {
-      this.isAborted = true;
-      if (this.reconnectTimer) {
-        clearTimeout(this.reconnectTimer);
-        this.reconnectTimer = null;
-      }
-      this.cleanup();
-    });
-  }
-
-  private cleanup(): void {
+  private cleanup(disconnected?: GatewayDisconnect): void {
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;
     }
-    if (
-      this.currentWs &&
-      (this.currentWs.readyState === WebSocket.OPEN ||
-        this.currentWs.readyState === WebSocket.CONNECTING)
-    ) {
-      this.currentWs.close();
-    }
+    const ws = this.currentWs;
+    // Retire ownership before close: ws can emit error/close after a replacement exists.
     this.currentWs = null;
+    this.isConnecting = false;
+    if (ws && ws.readyState !== WebSocket.CLOSED) ws.terminate();
+    if (disconnected) this.opts.onDisconnected?.(disconnected);
   }
 
   // ============ Reconnect ============
 
   private scheduleReconnect(customDelay?: number): void {
-    if (this.isAborted || this.reconnect.isExhausted()) {
-      this.opts.log?.error(
-        `[${this.opts.account.accountId}] Max reconnect attempts reached or aborted`,
-      );
+    if (this.isAborted) return;
+    if (this.reconnect.isExhausted()) {
+      const error = new Error("Max reconnect attempts reached");
+      this.opts.log?.error(`[${this.opts.account.accountId}] ${error.message}`);
+      this.finish(error);
+      this.opts.onError?.(error);
       return;
     }
     if (this.reconnectTimer) {
@@ -170,14 +187,15 @@ export class GatewayConnection {
   private async connect(): Promise<void> {
     const { log, account } = this.opts;
 
+    if (this.isAborted) return;
     if (this.isConnecting) {
       log?.debug?.(`[${account.accountId}] Already connecting, skip`);
       return;
     }
+    this.cleanup();
     this.isConnecting = true;
 
     try {
-      this.cleanup();
       if (this.shouldRefreshToken) {
         log?.debug?.(`[${account.accountId}] Refreshing token...`);
         this.opts.clearTokenCache?.();
@@ -185,8 +203,10 @@ export class GatewayConnection {
       }
 
       const accessToken = await this.opts.getAccessToken();
+      if (this.isAborted) return;
       log?.info(`[${account.accountId}] ✅ Access token obtained`);
       const gatewayUrl = await this.opts.getGatewayUrl(accessToken);
+      if (this.isAborted) return;
       log?.info(`[${account.accountId}] Connecting to ${gatewayUrl}`);
 
       const ws = new WebSocket(gatewayUrl, {
@@ -195,12 +215,14 @@ export class GatewayConnection {
       this.currentWs = ws;
 
       ws.on("open", () => {
+        if (ws !== this.currentWs) return;
         log?.info(`[${account.accountId}] WebSocket connected`);
         this.isConnecting = false;
         this.reconnect.onConnected();
       });
 
       ws.on("message", async (data) => {
+        if (ws !== this.currentWs) return;
         try {
           const rawData = decodeGatewayMessageData(data);
           const payload = JSON.parse(rawData) as WSPayload;
@@ -249,7 +271,7 @@ export class GatewayConnection {
               break;
 
             case GatewayOp.RECONNECT:
-              this.cleanup();
+              this.cleanup({ code: 1000, reason: "Gateway requested reconnect" });
               this.scheduleReconnect();
               break;
 
@@ -261,7 +283,7 @@ export class GatewayConnection {
                 this.opts.session?.clear();
                 this.shouldRefreshToken = true;
               }
-              this.cleanup();
+              this.cleanup({ code: 1000, reason: "Invalid gateway session" });
               this.scheduleReconnect(3000);
               break;
             }
@@ -274,18 +296,23 @@ export class GatewayConnection {
       });
 
       ws.on("close", (code, reason) => {
+        if (ws !== this.currentWs) return;
         log?.info(`[${account.accountId}] WebSocket closed: ${code} ${reason.toString()}`);
         this.isConnecting = false;
-        this.handleClose(code);
+        this.handleClose(code, reason.toString());
       });
 
       ws.on("error", (err) => {
+        if (ws !== this.currentWs) return;
         log?.error(`[${account.accountId}] WebSocket error: ${err.message}`);
         this.opts.onError?.(err);
       });
     } catch (err) {
+      if (this.isAborted) return;
       this.isConnecting = false;
-      const errMsg = err instanceof Error ? err.message : String(err);
+      const error = err instanceof Error ? err : new Error(String(err));
+      const errMsg = error.message;
+      this.opts.onError?.(error);
       log?.error(`[${account.accountId}] Connection failed: ${errMsg}`);
       if (errMsg.includes("Too many requests") || errMsg.includes("100001")) {
         this.scheduleReconnect(RATE_LIMIT_DELAY);
@@ -334,7 +361,7 @@ export class GatewayConnection {
     }, interval);
   }
 
-  private handleClose(code: number): void {
+  private handleClose(code: number, reason: string): void {
     const action = this.reconnect.handleClose(code, this.isAborted);
 
     if (action.clearSession) {
@@ -346,13 +373,14 @@ export class GatewayConnection {
       this.shouldRefreshToken = true;
     }
 
-    this.cleanup();
+    this.cleanup({ code, reason });
 
-    if (action.fatal) {
-      return;
-    }
     if (action.shouldReconnect) {
       this.scheduleReconnect(action.reconnectDelay);
+    } else {
+      const error = new Error(`Gateway closed (${code}): ${action.reason}`);
+      this.finish(error);
+      this.opts.onError?.(error);
     }
   }
 }

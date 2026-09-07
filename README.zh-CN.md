@@ -144,10 +144,14 @@ QQ 开放平台限制：`stream_messages` 仅在 C2C（私聊）开放。
 ```ts
 bot.on("ready", () => console.log("connected"));
 bot.on("resumed", () => console.log("reconnected"));
+bot.on("disconnected", ({ code, reason }) => console.log("disconnected", code, reason));
 bot.on("error", (err) => console.error(err));
 bot.on("message", (ctx, msg) => { /* C2C / Group / Guild / DM */ });
 bot.on("interaction", (ctx, event) => { /* button click etc. */ });
 ```
+
+WebSocket 模式下，重连次数耗尽或收到不可重试的关闭事件时，`start()` 会拒绝并释放
+连接与 token 刷新任务，调用方可重新启动机器人。`stop()` / abort 仍正常返回。
 
 ### 7. 协议层直接访问
 

@@ -35,7 +35,7 @@ import { ChunkedMediaApi } from "./protocol/api/media-chunked.js";
 import { MediaApi } from "./protocol/api/media.js";
 import { MessageApi } from "./protocol/api/messages.js";
 import { TokenManager } from "./protocol/api/token.js";
-import { GatewayConnection, type SessionPersistencePort } from "./protocol/gateway/gateway-connection.js";
+import { GatewayConnection, type GatewayDisconnect, type SessionPersistencePort } from "./protocol/gateway/gateway-connection.js";
 import type { InboundMessage } from "./protocol/gateway/event-dispatcher.js";
 import { WebhookTransport } from "./protocol/transport/webhook.js";
 import type { EventTransport, WebhookServerAdapter } from "./protocol/transport/types.js";
@@ -207,6 +207,7 @@ export interface RawEventContext {
 export type QQBotEventMap = {
   ready: (data: unknown) => void;
   resumed: (data: unknown) => void;
+  disconnected: (event: GatewayDisconnect) => void;
   error: (err: Error) => void;
   message: (ctx: MiddlewareContext, msg: QQBotInboundMessage) => void | Promise<void>;
   interaction: (ctx: InteractionContext, event: InteractionEvent) => void | Promise<void>;
@@ -272,6 +273,7 @@ export class QQBot {
   private readonly handlers: { [K in keyof QQBotEventMap]: Set<QQBotEventMap[K]> } = {
     ready: new Set(),
     resumed: new Set(),
+    disconnected: new Set(),
     error: new Set(),
     message: new Set(),
     interaction: new Set(),
@@ -448,46 +450,38 @@ export class QQBot {
    * - **Webhook mode**: starts an HTTP server to receive POST callbacks.
    *
    * Resolves when {@link stop} or the abort signal terminates the connection.
+   * Rejects when startup fails or the WebSocket reconnect budget is exhausted.
    */
   async start(externalSignal?: AbortSignal): Promise<void> {
-    if (this.gateway) {
-      throw new Error("QQBot: already started");
-    }
-    this.abortController = new AbortController();
-    if (externalSignal) {
-      if (externalSignal.aborted) {
-        this.abortController.abort();
+    if (this.abortController) throw new Error("QQBot: already started");
+    const controller = new AbortController();
+    this.abortController = controller;
+    const onAbort = () => controller.abort();
+    if (externalSignal?.aborted) controller.abort();
+    else externalSignal?.addEventListener("abort", onAbort, { once: true });
+
+    try {
+      if (controller.signal.aborted) return;
+      const transportMode = this.opts.transport ?? "websocket";
+      if (transportMode === "webhook") {
+        await this.startWebhook(controller.signal);
+      } else if (transportMode === "websocket") {
+        await this.startWebSocket(controller.signal);
       } else {
-        externalSignal.addEventListener("abort", () => this.abortController?.abort(), {
-          once: true,
-        });
+        await transportMode.start();
       }
+    } finally {
+      externalSignal?.removeEventListener("abort", onAbort);
+      this.tokenManager.stopBackgroundRefresh(this.creds.appId);
+      this.gateway = null;
+      this.abortController = null;
     }
-
-    const transportMode = this.opts.transport ?? "websocket";
-
-    if (transportMode === "webhook") {
-      await this.startWebhook();
-    } else if (transportMode === "websocket") {
-      await this.startWebSocket();
-    } else {
-      // Custom EventTransport instance
-      const custom = transportMode as EventTransport;
-      await custom.start();
-    }
-
-    // Cleanup
-    this.tokenManager.stopBackgroundRefresh(this.creds.appId);
-    this.gateway = null;
-    this.abortController = null;
   }
 
   /** Stop the transport and background refreshers. */
   stop(): void {
     this.abortController?.abort();
     this.tokenManager.stopBackgroundRefresh(this.creds.appId);
-    this.gateway = null;
-    this.abortController = null;
   }
 
   // ============ Token initialization ============
@@ -500,7 +494,7 @@ export class QQBot {
    * - `"async"`: fires the token fetch in the background and starts the
    *   background refresher immediately — trades fail-fast for faster startup.
    */
-  private async initToken(): Promise<void> {
+  private async initToken(signal: AbortSignal): Promise<void> {
     const mode = this.opts.tokenPrefetch ?? "sync";
 
     if (mode === "sync") {
@@ -513,17 +507,18 @@ export class QQBot {
       });
     }
 
-    this.tokenManager.startBackgroundRefresh(this.creds.appId, this.creds.clientSecret);
+    if (!signal.aborted) this.tokenManager.startBackgroundRefresh(this.creds.appId, this.creds.clientSecret);
   }
 
   // ============ Transport: WebSocket ============
 
-  private async startWebSocket(): Promise<void> {
-    await this.initToken();
+  private async startWebSocket(signal: AbortSignal): Promise<void> {
+    await this.initToken(signal);
+    if (signal.aborted) return;
 
     this.gateway = new GatewayConnection({
       account: this.account,
-      abortSignal: this.abortController!.signal,
+      abortSignal: signal,
       log: this.logger,
       userAgent: this.userAgent,
       intents: this.opts.intents,
@@ -543,6 +538,9 @@ export class QQBot {
       onError: (err) => {
         void this.emit("error", err);
       },
+      onDisconnected: (event) => {
+        void this.emit("disconnected", event);
+      },
       onMessage: (raw) => this.handleInboundMessage(raw),
       onInteraction: (event) => {
         const ctx: InteractionContext = { bot: this, event, state: {}, receivedAt: Date.now() };
@@ -559,8 +557,9 @@ export class QQBot {
 
   // ============ Transport: Webhook ============
 
-  private async startWebhook(): Promise<void> {
-    await this.initToken();
+  private async startWebhook(signal: AbortSignal): Promise<void> {
+    await this.initToken(signal);
+    if (signal.aborted) return;
 
     const webhook = new WebhookTransport(
       {
@@ -571,7 +570,7 @@ export class QQBot {
         server: this.opts.webhook?.server,
         accountId: this.account.accountId,
         log: this.logger,
-        abortSignal: this.abortController!.signal,
+        abortSignal: signal,
       },
       {
         onReady: (data) => {
