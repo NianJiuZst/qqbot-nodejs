@@ -29,7 +29,7 @@ pnpm lint
 pnpm test
 ```
 
-The `dist/` output is only produced at publish time via `pnpm build` (and is
+The `dist/` output is only produced at publish time via `npm run build` (and is
 `.gitignore`d). You should not commit build artifacts.
 
 ## Development Workflow

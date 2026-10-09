@@ -33,7 +33,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "semantic-release": "semantic-release",
-    "prepack": "pnpm build",
+    "ci:prepare-test-pkg": "node scripts/prepare-test-pkg.js",
+    "prepack": "npm run build",
     "playground": "tsx examples/playground/index.ts",
     "example:webhook": "tsx examples/webhook/index.ts"
   },
@@ -51,7 +52,7 @@
     "@vitest/coverage-v8": "^4.1.10",
     "eslint": "^10.6.0",
     "globals": "^17.7.0",
-    "mpg123-decoder": "^1.0.4",
+    "mpg123-decoder": "^1.0.3",
     "semantic-release": "^25.0.5",
     "silk-wasm": "^3.7.1",
     "tsx": "^4.23.0",
@@ -60,7 +61,7 @@
     "vitest": "^4.1.10"
   },
   "peerDependencies": {
-    "mpg123-decoder": "^1.0.4",
+    "mpg123-decoder": "^1.0.3",
     "silk-wasm": "^3.7.1"
   },
   "peerDependenciesMeta": {
@@ -100,7 +101,6 @@
     "url": "https://github.com/tencent-connect/qqbot-nodejs/issues"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   }
 }
