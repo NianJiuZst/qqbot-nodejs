@@ -35,8 +35,13 @@ import { ChunkedMediaApi } from "./protocol/api/media-chunked.js";
 import { MediaApi } from "./protocol/api/media.js";
 import { MessageApi } from "./protocol/api/messages.js";
 import { TokenManager } from "./protocol/api/token.js";
-import { GatewayConnection, type GatewayDisconnect, type SessionPersistencePort } from "./protocol/gateway/gateway-connection.js";
+import {
+  GatewayConnection,
+  type GatewayDisconnect,
+  type SessionPersistencePort,
+} from "./protocol/gateway/gateway-connection.js";
 import type { InboundMessage } from "./protocol/gateway/event-dispatcher.js";
+import { resolveReconnectPolicy, type ReconnectPolicy } from "./protocol/gateway/reconnect.js";
 import { WebhookTransport } from "./protocol/transport/webhook.js";
 import type { EventTransport, WebhookServerAdapter } from "./protocol/transport/types.js";
 import {
@@ -145,6 +150,13 @@ export interface QQBotOptions {
   sessionPersistence?: SessionPersistencePort;
   /** Custom intent mask. Defaults to FULL_INTENTS (group + c2c + interaction). */
   intents?: number;
+  /**
+   * WebSocket reconnect budget. `maxAttempts` defaults to `Infinity` (retry
+   * forever). When a finite budget is exhausted, `start()` rejects with a
+   * `GatewayError` (`GATEWAY_RETRY_EXHAUSTED`) — set one when an outer
+   * supervisor restarts the bot.
+   */
+  reconnect?: Partial<ReconnectPolicy>;
   /** Override the upload cache. Defaults to a private in-memory cache. */
   uploadCache?: UploadCache;
 
@@ -291,6 +303,7 @@ export class QQBot {
     if (!options.appSecret) {
       throw new Error("QQBot: appSecret is required");
     }
+    resolveReconnectPolicy(options.reconnect); // fail fast on an invalid budget
     this.opts = options;
     this.logger = options.logger ?? noopLogger;
     this.userAgent = options.userAgent ?? `qqbot-nodejs/0.1.0 (Node/${process.versions.node})`;
@@ -450,15 +463,23 @@ export class QQBot {
    * - **Webhook mode**: starts an HTTP server to receive POST callbacks.
    *
    * Resolves when {@link stop} or the abort signal terminates the connection.
-   * Rejects when startup fails or the WebSocket reconnect budget is exhausted.
+   * Rejects when startup fails, or — in WebSocket mode — with a `GatewayError`
+   * when a finite `reconnect.maxAttempts` is exhausted (`GATEWAY_RETRY_EXHAUSTED`) or the
+   * gateway closes with a non-retryable code (`GATEWAY_FATAL_CLOSE`). Resources
+   * are released either way, so the bot can be started again.
    */
   async start(externalSignal?: AbortSignal): Promise<void> {
     if (this.abortController) throw new Error("QQBot: already started");
+    // The controller doubles as the run's ownership token: only the run that
+    // still owns it may reset shared state (see stop()).
     const controller = new AbortController();
     this.abortController = controller;
     const onAbort = () => controller.abort();
-    if (externalSignal?.aborted) controller.abort();
-    else externalSignal?.addEventListener("abort", onAbort, { once: true });
+    if (externalSignal?.aborted) {
+      controller.abort();
+    } else {
+      externalSignal?.addEventListener("abort", onAbort, { once: true });
+    }
 
     try {
       if (controller.signal.aborted) return;
@@ -468,20 +489,30 @@ export class QQBot {
       } else if (transportMode === "websocket") {
         await this.startWebSocket(controller.signal);
       } else {
-        await transportMode.start();
+        await this.startCustomTransport(transportMode, controller.signal);
       }
     } finally {
       externalSignal?.removeEventListener("abort", onAbort);
-      this.tokenManager.stopBackgroundRefresh(this.creds.appId);
-      this.gateway = null;
-      this.abortController = null;
+      if (this.abortController === controller) this.releaseRun();
     }
   }
 
-  /** Stop the transport and background refreshers. */
+  /**
+   * Stop the transport and background refreshers.
+   *
+   * Ownership is released synchronously, so `start()` may be called again
+   * right away; the previous `start()` promise still resolves on its own.
+   */
   stop(): void {
-    this.abortController?.abort();
+    const controller = this.abortController;
+    this.releaseRun();
+    controller?.abort();
+  }
+
+  private releaseRun(): void {
     this.tokenManager.stopBackgroundRefresh(this.creds.appId);
+    this.gateway = null;
+    this.abortController = null;
   }
 
   // ============ Token initialization ============
@@ -522,6 +553,7 @@ export class QQBot {
       log: this.logger,
       userAgent: this.userAgent,
       intents: this.opts.intents,
+      reconnect: this.opts.reconnect,
       session: this.opts.sessionPersistence,
       getAccessToken: () =>
         this.tokenManager.getAccessToken(this.creds.appId, this.creds.clientSecret),
@@ -592,6 +624,18 @@ export class QQBot {
     );
 
     await webhook.start();
+  }
+
+  // ============ Transport: custom ============
+
+  private async startCustomTransport(transport: EventTransport, signal: AbortSignal): Promise<void> {
+    const onAbort = () => transport.stop();
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      await transport.start();
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
   }
 
   // ============ Shared inbound message handler ============

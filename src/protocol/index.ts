@@ -61,6 +61,8 @@ export {
   GatewayCloseCode,
   GatewayEvent,
   GatewayOp,
+  HANDSHAKE_TIMEOUT_MS,
+  INVALID_SESSION_DELAY,
   InteractionType,
   MAX_QUICK_DISCONNECT_COUNT,
   MAX_RECONNECT_ATTEMPTS,
@@ -69,7 +71,13 @@ export {
   RECONNECT_DELAYS,
 } from "./gateway/constants.js";
 export { decodeGatewayMessageData, readOptionalMessageSceneExt } from "./gateway/codec.js";
-export { ReconnectState, type CloseAction } from "./gateway/reconnect.js";
+export {
+  ReconnectState,
+  resolveReconnectPolicy,
+  type CloseAction,
+  type ReconnectPolicy,
+} from "./gateway/reconnect.js";
+export { GatewayError, GatewayErrorCode } from "./gateway/errors.js";
 export {
   dispatchEvent,
   type DispatchResult,
